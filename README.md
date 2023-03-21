@@ -1,3 +1,9 @@
+# Disclaimer
+
+This gem is inspired by jsonapi-serializer gem, still contains a lot of gltengage.com related code, so it can't be used as a standalone gem. The main purpose of this gem is to provide a way to serialize gltengage.com models to jsonapi format.
+
+The main change is that Query objects are applied to the collection before serialization of included objects.
+
 # JSON:API Serialization Library
 
 A fast [JSON:API](https://jsonapi.org/) serializer for Ruby Objects.
