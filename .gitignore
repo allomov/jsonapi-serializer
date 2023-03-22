@@ -36,6 +36,7 @@ test.db
 
 # For those using rbenv
 .ruby-version
+.ruby-gemset
 
 # For those who install gems locally to a vendor dir
 /vendor

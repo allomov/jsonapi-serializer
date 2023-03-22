@@ -356,6 +356,9 @@ module JSONAPI
 
         # get query, if possible
         query_object = get_query_object(maybe_proc)
+
+        # This can cause N+1 issue
+        # We should refactor it for collection for better performance
         if query_object && query_object.respond_to?(:call) && params[:current_user]
           return query_object.call(
             query_params.merge(
@@ -371,7 +374,27 @@ module JSONAPI
       def get_query_object(maybe_proc)
         return if maybe_proc.is_a?(Proc)
 
-        @relationships_to_serialize&.dig(maybe_proc, :options, :query)
+        (@query_objects_cache ||= {})[maybe_proc] ||= begin
+          if @relationships_to_serialize&.has_key?(maybe_proc)
+            @relationships_to_serialize&.dig(maybe_proc, :options, :query) ||
+            build_safe_query_class(maybe_proc)
+          end
+        end
+      end
+
+      def serializer_feature_namespace
+        @feature_namespace ||= begin
+          constants = self.name.split("::")
+          constants[0..(constants.index("Serializers") || constants.length) - 1].join("::")
+        end
+      end
+
+      def build_safe_query_class(resource_name)
+        [
+          serializer_feature_namespace,
+          "Queries",
+          "#{resource_name.to_s.pluralize.camelcase}Query"
+        ].join("::").safe_constantize
       end
 
       # Calls [Proc] with respect to the number of parameters it takes
