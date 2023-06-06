@@ -356,19 +356,45 @@ module JSONAPI
 
         # get query, if possible
         query_object = get_query_object(maybe_proc)
-
         # This can cause N+1 issue
         # We should refactor it for collection for better performance
         if query_object && query_object.respond_to?(:call) && params[:current_user]
+          resulting_scope = record.public_send(maybe_proc)
+          activerecord_relation_scope = ensure_active_record_relation(resulting_scope)
+
           return query_object.call(
             query_params.merge(
-              scope: record.public_send(maybe_proc),
+              scope: activerecord_relation_scope,
               current_user: params[:current_user]
             )
           )
         end
 
         record.public_send(maybe_proc)
+      end
+
+      def ensure_active_record_relation(scope)
+        return scope if scope.is_a?(ActiveRecord::Relation)
+
+        scope_as_array = Array(scope)
+        klasses = scope_as_array.collect(&:class).uniq
+        raise 'Array cannot be converted to ActiveRecord::Relation since it does not have same elements' if klasses.size > 1 && !valid_collection_with_sti?(scope_as_array)
+
+        klass = klasses.first
+        raise 'Element class is not ApplicationRecord and as such cannot be converted' unless klass.ancestors.include?(ApplicationRecord)
+
+        klass.where(id: scope_as_array.collect(&:id))
+      end
+
+      def valid_collection_with_sti?(collection)
+        inheritance_column = collection.first.class.inheritance_column
+        return false unless collection.first.respond_to?(:inheritance_column)
+
+        sti_class = collection.first.send(inheritance_column)
+        collection.all? do |item|
+          item.class.respond_to?(:inheritance_column) &&
+          item.send(inheritance_column) == sti_class
+        end
       end
 
       def get_query_object(maybe_proc)
