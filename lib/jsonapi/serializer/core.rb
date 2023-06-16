@@ -14,7 +14,7 @@ module JSONAPI
       # @param fieldset [Array<String>] of attributes to serialize
       # @param params [Hash] the record processing parameters
       # @return [Hash]
-      def record_hash(record, fieldset, params)
+      def record_hash(record, fieldset, params, query_pagination = {}, query_filter = {})
         if @cache_store_instance
           cache_opts = record_cache_options(
             @cache_store_options, fieldset, @options
@@ -22,18 +22,19 @@ module JSONAPI
 
           rhash = @cache_store_instance.fetch(record, **cache_opts) do
             rels = cachable_relationships_to_serialize
-            record_hash_data(record, fieldset, params, rels)
+            record_hash_data(record, fieldset, params, rels, query_pagination, query_filter)
           end
 
           unless uncachable_relationships_to_serialize.nil?
             rels = uncachable_relationships_to_serialize
             rhash[:relationships] = (rhash[:relationships] || {}).merge(
-              relationships_hash(record, rels, fieldset, params)
+              relationships_hash(record, rels, fieldset, params, query_pagination, query_filter)
             )
           end
         else
           rels = @relationships_to_serialize
-          rhash = record_hash_data(record, fieldset, params, rels)
+          # this is the place where we need to pass included filter options
+          rhash = record_hash_data(record, fieldset, params, rels, query_pagination, query_filter)
         end
 
         rhash[:meta] = meta_hash(@meta_to_serialize, record, params)
@@ -41,6 +42,13 @@ module JSONAPI
         rhash.delete(:links) if rhash[:links].nil?
 
         rhash
+      end
+
+      def query_object_params_for(item, query_pagination, query_filter)
+        pagination_params = query_pagination[item.to_sym] || {}
+        filter_params = query_filter[item.to_sym] || {}
+
+        pagination_params.merge(filter_params)
       end
 
       # Generates the JSONAPI [Array] for (includes) related records of a record
@@ -61,12 +69,9 @@ module JSONAPI
         items = parse_includes_list(items)
 
         items.each_with_object([]) do |(item, item_includes), included|
-          pagination_params = query_pagination[item.to_sym] || {}
-          filter_params = query_filter[item.to_sym] || {}
+          query_object_params = query_object_params_for(item, query_pagination, query_filter)
 
-          # Remove nested attributes from the query params
-          cleared_query_params = pagination_params.merge(filter_params)
-          to_include = record_include_item(item, record, params, cleared_query_params)
+          to_include = record_include_item(item, record, params, query_object_params)
           next if to_include.nil?
 
           rel_objects, rel_options = to_include
@@ -87,7 +92,7 @@ module JSONAPI
             if item_includes.any?
               included.concat(
                 serializer.record_includes(
-                  rel_obj, item_includes, known, fieldsets, params, pagination_params, filter_params
+                  rel_obj, item_includes, known, fieldsets, params, query_pagination, query_filter
                 )
               )
             end
@@ -153,7 +158,7 @@ module JSONAPI
         [objects, rel_options]
       end
 
-      def record_hash_data(record, fieldset, params, relationships)
+      def record_hash_data(record, fieldset, params, relationships, query_pagination = {}, query_filter = {})
         temp_hash = id_hash(id_from_record(record, params), use_default: true)
 
         if @attributes_to_serialize
@@ -167,7 +172,9 @@ module JSONAPI
             record,
             relationships,
             fieldset,
-            params
+            params,
+            query_pagination,
+            query_filter
           )
         end
 
@@ -175,7 +182,7 @@ module JSONAPI
         temp_hash
       end
 
-      def relationships_hash(record, relationships, fieldset, params)
+      def relationships_hash(record, relationships, fieldset, params, query_pagination = {}, query_filter = {})
         relationships = relationships.slice(*fieldset) unless fieldset.nil?
 
         relationships.each_with_object({}) do |(key, rel), rhash|
@@ -184,9 +191,10 @@ module JSONAPI
           next unless condition_passes?(rel_opts[:if], record, params)
 
           key = run_key_transform(key)
+          query_object_params = query_object_params_for(key, query_pagination, query_filter)
 
           rhash[key] = {
-            data: relationship_ids(rel, record, params),
+            data: relationship_ids(rel, record, params, query_object_params),
             meta: meta_hash(rel_opts[:meta], record, params),
             links: links_hash(rel_opts[:links], record, params)
           }
@@ -203,7 +211,7 @@ module JSONAPI
       # @param params [Hash] the object processing parameters
       # @return [Array] of hashes
       # rubocop:disable Metrics/PerceivedComplexity,Metrics/CyclomaticComplexity
-      def relationship_ids(relationship, record, params)
+      def relationship_ids(relationship, record, params, query_object_params = {})
         rel_opts = relationship[:options]
         has_many = (relationship[:relationship_type] == :has_many)
         serializer = rel_opts[:serializer]
@@ -211,19 +219,22 @@ module JSONAPI
         ids_rails_postfix = '_id'
         ids_rails_postfix = '_ids' if has_many
 
+        obj_method_name = relationship[:object_block] || relationship[:name]
+        rel_objects = call_proc_or_method(obj_method_name, record, params, query_object_params)
+
         if serializer.is_a?(Class)
-          ids_meth = rel_opts[:ids_method_name]
-          ids_meth ||= relationship[:name].to_s + ids_rails_postfix
+          ids = if rel_objects.nil?
+            ids_meth = rel_opts[:ids_method_name]
+            ids_meth ||= relationship[:name].to_s + ids_rails_postfix
 
-          ids = record.public_send(ids_meth) if record.respond_to?(ids_meth)
+            record.public_send(ids_meth) if record.respond_to?(ids_meth)
+          else
+            rel_objects.map(&:id)
+          end || []
 
-          return serializer.id_hash(ids) unless ids.nil? && has_many
-
-          return ids.map! { |oid| serializer.id_hash(oid) } unless ids.nil?
+          return has_many ? ids.map! { |oid| serializer.id_hash(oid) } : serializer.id_hash(ids.first)
         end
 
-        obj_method_name = relationship[:object_block] || relationship[:name]
-        rel_objects = call_proc_or_method(obj_method_name, record, params)
         rel_objects = Array(rel_objects)
         ids = rel_objects.map do |robj|
           robj_ser = serializer
@@ -354,6 +365,11 @@ module JSONAPI
       def call_proc_or_method(maybe_proc, record, params, query_params = {})
         return call_proc(maybe_proc, record, params) if maybe_proc.is_a?(Proc)
 
+        result = get_related_entities_using_query_object(maybe_proc, record, params, query_params)
+        result.nil? ? record.public_send(maybe_proc) : result
+      end
+
+      def get_related_entities_using_query_object(maybe_proc, record, params, query_params = {})
         # get query, if possible
         query_object = get_query_object(maybe_proc)
         # This can cause N+1 issue
@@ -369,8 +385,6 @@ module JSONAPI
             )
           )
         end
-
-        record.public_send(maybe_proc)
       end
 
       def ensure_active_record_relation(scope)

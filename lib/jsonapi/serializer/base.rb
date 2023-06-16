@@ -39,7 +39,7 @@ module JSONAPI
           serializer_class ||= JSONAPI::Serializer.for_object(record, nil, default_serializer: self.class)
 
           fieldset = @fieldsets[serializer_class.record_type]
-          data << serializer_class.record_hash(record, fieldset, @params)
+          data << serializer_class.record_hash(record, fieldset, @params, @include_page, @include_filter)
 
           included += serializer_class.record_includes(
             record, @includes, included_oids, @fieldsets, @params, @include_page, @include_filter
