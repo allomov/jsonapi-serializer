@@ -106,7 +106,7 @@ module JSONAPI
             known << rel_obj_id
 
             included << serializer.record_hash(
-              rel_obj, fieldsets[serializer.record_type], params
+              rel_obj, fieldsets[serializer.record_type], params, query_pagination, query_filter
             )
           end
         end
